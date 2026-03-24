@@ -3,7 +3,7 @@
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -122,6 +122,7 @@ class BroadcastRequest(BaseModel):
 @router.post("/notifications/broadcast")
 async def broadcast_notification(
     req: BroadcastRequest,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -140,6 +141,7 @@ async def broadcast_notification(
     count_users = 0
     count_agents = 0
     count_emails = 0
+    email_recipients = []
 
     if req.send_email:
         from app.services.system_email_service import get_system_email_config
@@ -179,24 +181,32 @@ async def broadcast_notification(
         count_agents += 1
 
     if req.send_email:
-        from app.services.system_email_service import send_system_email
+        from app.services.system_email_service import (
+            BroadcastEmailRecipient,
+            deliver_broadcast_emails,
+            run_background_email_job,
+        )
 
         for user in users:
             if not user.email:
                 continue
-            await send_system_email(
-                user.email,
-                req.title,
-                (
-                    f"{req.body}\n\n"
-                    f"Sent by: {sender_name}"
-                    if req.body.strip()
-                    else f"Sent by: {sender_name}"
+            email_recipients.append(
+                BroadcastEmailRecipient(
+                    email=user.email,
+                    subject=req.title,
+                    body=(
+                        f"{req.body}\n\n"
+                        f"Sent by: {sender_name}"
+                        if req.body.strip()
+                        else f"Sent by: {sender_name}"
+                    ),
                 ),
             )
             count_emails += 1
 
     await db.commit()
+    if email_recipients:
+        background_tasks.add_task(run_background_email_job, deliver_broadcast_emails, email_recipients)
     return {
         "ok": True,
         "users_notified": count_users,

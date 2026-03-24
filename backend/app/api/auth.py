@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -151,7 +151,11 @@ async def login(data: UserLogin, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/forgot-password")
-async def forgot_password(data: ForgotPasswordRequest, db: AsyncSession = Depends(get_db)):
+async def forgot_password(
+    data: ForgotPasswordRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
     """Request a password reset link without revealing account existence."""
     generic_response = {
         "ok": True,
@@ -165,22 +169,25 @@ async def forgot_password(data: ForgotPasswordRequest, db: AsyncSession = Depend
 
     try:
         from app.services.password_reset_service import build_password_reset_url, create_password_reset_token
-        from app.services.system_email_service import send_system_email
+        from app.services.system_email_service import (
+            get_system_email_config,
+            run_background_email_job,
+            send_password_reset_email,
+        )
 
+        get_system_email_config()
         raw_token, expires_at = await create_password_reset_token(db, user.id)
         await db.commit()
 
         reset_url = await build_password_reset_url(db, raw_token)
         expiry_minutes = int((expires_at - datetime.now(timezone.utc)).total_seconds() // 60)
-        await send_system_email(
+        background_tasks.add_task(
+            run_background_email_job,
+            send_password_reset_email,
             user.email,
-            "Reset your Clawith password",
-            (
-                f"Hello {user.display_name or user.username},\n\n"
-                f"We received a request to reset your Clawith password.\n\n"
-                f"Reset link: {reset_url}\n\n"
-                f"This link expires in {expiry_minutes} minutes. If you did not request this, you can ignore this email."
-            ),
+            user.display_name or user.username,
+            reset_url,
+            expiry_minutes,
         )
     except Exception as exc:
         logger.warning(f"Failed to process password reset email for {data.email}: {exc}")
