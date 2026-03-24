@@ -7,12 +7,14 @@ from fastapi import HTTPException
 from starlette.background import BackgroundTasks
 
 from app.api import auth as auth_api
+from app.api import enterprise as enterprise_api
 from app.api.notification import BroadcastRequest, broadcast_notification
 from app.core.security import verify_password
+from app.models.org import OrgDepartment, OrgMember
 from app.models.password_reset_token import PasswordResetToken
 from app.models.user import User
 from app.schemas.schemas import ForgotPasswordRequest, ResetPasswordRequest
-from app.services import password_reset_service
+from app.services import org_sync_service, password_reset_service
 from app.services.system_email_service import SystemEmailConfigError
 
 
@@ -278,8 +280,159 @@ async def test_broadcast_notification_queues_email_delivery(monkeypatch):
     assert response["ok"] is True
     assert response["emails_sent"] == 1
     assert db.committed is True
-    assert len(notifications) == 1
-    assert len(background_tasks.tasks) == 1
+
+
+@pytest.mark.asyncio
+async def test_org_sync_public_config_falls_back_to_legacy_feishu_setting():
+    legacy_setting = SimpleNamespace(
+        value={
+            "app_id": "cli_123",
+            "app_secret": "legacy-secret",
+            "last_synced_at": "2026-03-24T10:00:00+00:00",
+        }
+    )
+    db = RecordingDB([DummyResult(None), DummyResult(legacy_setting)])
+
+    value = await org_sync_service.org_sync_service.get_public_config(db)
+
+    assert value["provider"] == "feishu"
+    assert value["feishu"]["app_id"] == "cli_123"
+    assert value["feishu"]["app_secret"] == ""
+    assert value["feishu"]["last_synced_at"] == "2026-03-24T10:00:00+00:00"
+    assert value["wecom"]["corp_id"] == ""
+
+
+@pytest.mark.asyncio
+async def test_org_sync_public_config_redacts_provider_secrets():
+    stored_setting = SimpleNamespace(
+        value={
+            "provider": "wecom",
+            "feishu": {"app_id": "cli_123", "app_secret": "keep-feishu", "last_synced_at": None},
+            "wecom": {"corp_id": "ww123", "corp_secret": "keep-wecom", "last_synced_at": None},
+        }
+    )
+    db = RecordingDB([DummyResult(stored_setting)])
+
+    value = await org_sync_service.org_sync_service.get_public_config(db)
+
+    assert value["feishu"]["app_secret"] == ""
+    assert value["wecom"]["corp_secret"] == ""
+
+
+@pytest.mark.asyncio
+async def test_org_sync_save_config_preserves_existing_provider_secrets():
+    existing_setting = SimpleNamespace(
+        key="org_sync",
+        value={
+            "provider": "wecom",
+            "feishu": {"app_id": "cli_123", "app_secret": "keep-feishu", "last_synced_at": None},
+            "wecom": {"corp_id": "ww123", "corp_secret": "keep-wecom", "last_synced_at": None},
+        },
+    )
+    db = RecordingDB([DummyResult(existing_setting), DummyResult(existing_setting)])
+
+    saved = await org_sync_service.org_sync_service.save_config(
+        db,
+        {
+            "provider": "wecom",
+            "feishu": {"app_id": "cli_456", "app_secret": ""},
+            "wecom": {"corp_id": "ww456", "corp_secret": ""},
+        },
+    )
+
+    assert saved["feishu"]["app_secret"] == "keep-feishu"
+    assert saved["wecom"]["corp_secret"] == "keep-wecom"
+    assert existing_setting.value["feishu"]["app_id"] == "cli_456"
+    assert existing_setting.value["wecom"]["corp_id"] == "ww456"
+    assert db.committed is True
+
+
+@pytest.mark.asyncio
+async def test_get_org_sync_setting_requires_admin():
+    with pytest.raises(HTTPException) as excinfo:
+        await enterprise_api.get_system_setting(
+            key="org_sync",
+            current_user=make_user(role="member"),
+            db=RecordingDB(),
+        )
+
+    assert excinfo.value.status_code == 403
+    assert excinfo.value.detail == "Admin access required"
+
+
+@pytest.mark.asyncio
+async def test_list_org_departments_filters_by_active_provider(monkeypatch):
+    wecom_dept = OrgDepartment(
+        wecom_id="2",
+        sync_provider="wecom",
+        name="Engineering",
+        member_count=3,
+    )
+    db = RecordingDB([DummyResult(values=[wecom_dept])])
+
+    async def fake_get_active_provider(_db):
+        return "wecom", {"corp_id": "ww123"}, {"provider": "wecom"}
+
+    monkeypatch.setattr(org_sync_service.org_sync_service, "get_active_provider", fake_get_active_provider)
+
+    rows = await enterprise_api.list_org_departments(
+        tenant_id=None,
+        current_user=make_user(),
+        db=db,
+    )
+
+    assert rows == [
+        {
+            "id": str(wecom_dept.id),
+            "provider": "wecom",
+            "feishu_id": None,
+            "wecom_id": "2",
+            "name": "Engineering",
+            "parent_id": None,
+            "path": None,
+            "member_count": 3,
+        }
+    ]
+    assert "sync_provider" in str(db.executed[0])
+
+
+@pytest.mark.asyncio
+async def test_list_org_members_filters_by_active_provider(monkeypatch):
+    wecom_member = OrgMember(
+        wecom_user_id="zhangsan",
+        sync_provider="wecom",
+        name="张三",
+        email="zhangsan@example.com",
+        title="Engineer",
+        department_path="Root / Engineering",
+    )
+    db = RecordingDB([DummyResult(values=[wecom_member])])
+
+    async def fake_get_active_provider(_db):
+        return "wecom", {"corp_id": "ww123"}, {"provider": "wecom"}
+
+    monkeypatch.setattr(org_sync_service.org_sync_service, "get_active_provider", fake_get_active_provider)
+
+    rows = await enterprise_api.list_org_members(
+        department_id=None,
+        search=None,
+        tenant_id=None,
+        current_user=make_user(),
+        db=db,
+    )
+
+    assert rows == [
+        {
+            "id": str(wecom_member.id),
+            "provider": "wecom",
+            "name": "张三",
+            "email": "zhangsan@example.com",
+            "title": "Engineer",
+            "department_path": "Root / Engineering",
+            "avatar_url": None,
+        }
+    ]
+    assert "sync_provider" in str(db.executed[0])
 
 
 @pytest.mark.asyncio

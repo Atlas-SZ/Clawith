@@ -5,13 +5,18 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import select, func
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.security import get_current_admin, get_current_user, require_role
+from app.core.security import get_current_admin, get_current_user
 from app.database import get_db
 from app.models.agent import Agent
 from app.models.audit import ApprovalRequest, AuditLog, EnterpriseInfo
+from app.models.invitation_code import InvitationCode
 from app.models.llm import LLMModel
+from app.models.org import OrgDepartment, OrgMember
+from app.models.system_settings import SystemSetting
+from app.models.tenant import Tenant
 from app.models.user import User
 from app.schemas.schemas import (
     ApprovalAction, ApprovalRequestOut, AuditLogOut, EnterpriseInfoOut,
@@ -209,7 +214,7 @@ async def update_llm_model(
         await db.commit()
         await db.refresh(model)
         return LLMModelOut.model_validate(model)
-    except SQLAlchemyError as e:
+    except SQLAlchemyError:
         await db.rollback()
         raise HTTPException(status_code=500, detail="Failed to update model")
 
@@ -344,7 +349,7 @@ async def get_enterprise_stats(
         select(func.count(Agent.id)).where(Agent.tenant_id == tid, Agent.status == "running")
     )
     total_users = await db.execute(
-        select(func.count(User.id)).where(User.tenant_id == tid, User.is_active == True)
+        select(func.count(User.id)).where(User.tenant_id == tid, User.is_active)
     )
     pending_approvals = await db.execute(
         select(func.count(ApprovalRequest.id)).where(ApprovalRequest.status == "pending")
@@ -359,8 +364,6 @@ async def get_enterprise_stats(
 
 
 # ─── Tenant Quota Settings ──────────────────────────────
-
-from app.models.tenant import Tenant
 
 
 class TenantQuotaUpdate(BaseModel):
@@ -452,8 +455,6 @@ async def update_tenant_quotas(
 
 # ─── System Settings ───────────────────────────────────
 
-from app.models.system_settings import SystemSetting
-
 
 class SettingUpdate(BaseModel):
     value: dict
@@ -483,6 +484,14 @@ async def get_system_setting(
     db: AsyncSession = Depends(get_db),
 ):
     """Get a system setting by key."""
+    if key == "org_sync":
+        if current_user.role not in ("platform_admin", "org_admin"):
+            raise HTTPException(status_code=403, detail="Admin access required")
+        from app.services.org_sync_service import org_sync_service
+
+        value = await org_sync_service.get_public_config(db)
+        return {"key": key, "value": value}
+
     result = await db.execute(select(SystemSetting).where(SystemSetting.key == key))
     setting = result.scalar_one_or_none()
     if not setting:
@@ -501,6 +510,12 @@ async def update_system_setting(
     # Platform-level settings (e.g. PUBLIC_BASE_URL) require platform_admin
     if key == "platform" and current_user.role != "platform_admin":
         raise HTTPException(status_code=403, detail="Only platform admin can modify platform settings")
+    if key == "org_sync":
+        from app.services.org_sync_service import org_sync_service
+
+        value = await org_sync_service.save_config(db, data.value)
+        return {"key": key, "value": value}
+
     result = await db.execute(select(SystemSetting).where(SystemSetting.key == key))
     setting = result.scalar_one_or_none()
     if setting:
@@ -514,8 +529,6 @@ async def update_system_setting(
 
 # ─── Org Structure ──────────────────────────────────────
 
-from app.models.org import OrgDepartment, OrgMember
-
 
 @router.get("/org/departments")
 async def list_org_departments(
@@ -524,7 +537,10 @@ async def list_org_departments(
     db: AsyncSession = Depends(get_db),
 ):
     """List all departments, optionally filtered by tenant."""
-    query = select(OrgDepartment)
+    from app.services.org_sync_service import org_sync_service
+
+    provider, _, _ = await org_sync_service.get_active_provider(db)
+    query = select(OrgDepartment).where(OrgDepartment.sync_provider == provider)
     if tenant_id:
         query = query.where(OrgDepartment.tenant_id == uuid.UUID(tenant_id))
     result = await db.execute(query.order_by(OrgDepartment.name))
@@ -532,7 +548,9 @@ async def list_org_departments(
     return [
         {
             "id": str(d.id),
+            "provider": d.sync_provider,
             "feishu_id": d.feishu_id,
+            "wecom_id": d.wecom_id,
             "name": d.name,
             "parent_id": str(d.parent_id) if d.parent_id else None,
             "path": d.path,
@@ -551,7 +569,13 @@ async def list_org_members(
     db: AsyncSession = Depends(get_db),
 ):
     """List org members, optionally filtered by department, search, or tenant."""
-    query = select(OrgMember).where(OrgMember.status == "active")
+    from app.services.org_sync_service import org_sync_service
+
+    provider, _, _ = await org_sync_service.get_active_provider(db)
+    query = select(OrgMember).where(
+        OrgMember.status == "active",
+        OrgMember.sync_provider == provider,
+    )
     if tenant_id:
         query = query.where(OrgMember.tenant_id == uuid.UUID(tenant_id))
     if department_id:
@@ -564,6 +588,7 @@ async def list_org_members(
     return [
         {
             "id": str(m.id),
+            "provider": m.sync_provider,
             "name": m.name,
             "email": m.email,
             "title": m.title,
@@ -578,15 +603,13 @@ async def list_org_members(
 async def trigger_org_sync(
     current_user: User = Depends(get_current_admin),
 ):
-    """Manually trigger org structure sync from Feishu."""
+    """Manually trigger org structure sync from the active provider."""
     from app.services.org_sync_service import org_sync_service
     result = await org_sync_service.full_sync()
     return result
 
 
 # ─── Invitation Codes ───────────────────────────────────
-
-from app.models.invitation_code import InvitationCode
 
 
 class InvitationCodeCreate(BaseModel):
