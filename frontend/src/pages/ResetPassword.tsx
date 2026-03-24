@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { authApi } from '../services/api';
 
 export default function ResetPassword() {
+    const { t } = useTranslation();
     const navigate = useNavigate();
     const [params] = useSearchParams();
     const token = useMemo(() => params.get('token') || '', [params]);
@@ -21,15 +23,15 @@ export default function ResetPassword() {
         setError('');
 
         if (!token) {
-            setError('Reset token is missing from the link.');
+            setError(t('auth.resetPasswordMissingToken', 'Reset token is missing from the link.'));
             return;
         }
         if (password.length < 6) {
-            setError('New password must be at least 6 characters.');
+            setError(t('auth.resetPasswordTooShort', 'New password must be at least 6 characters.'));
             return;
         }
         if (password !== confirmPassword) {
-            setError('Passwords do not match.');
+            setError(t('auth.resetPasswordMismatch', 'Passwords do not match.'));
             return;
         }
 
@@ -39,7 +41,7 @@ export default function ResetPassword() {
             setSuccess(true);
             window.setTimeout(() => navigate('/login'), 1200);
         } catch (err: any) {
-            setError(err.message || 'Failed to reset password');
+            setError(err.message || t('auth.resetPasswordFailed', 'Failed to reset password'));
         } finally {
             setLoading(false);
         }
@@ -54,9 +56,9 @@ export default function ResetPassword() {
                             <img src="/logo-black.png" className="login-logo-img" alt="" style={{ width: 28, height: 28, marginRight: 8, verticalAlign: 'middle' }} />
                             Clawith
                         </div>
-                        <h2 className="login-form-title">Reset password</h2>
+                        <h2 className="login-form-title">{t('auth.resetPasswordTitle', 'Reset password')}</h2>
                         <p className="login-form-subtitle">
-                            Choose a new password for your account.
+                            {t('auth.resetPasswordSubtitle', 'Choose a new password for your account.')}
                         </p>
                     </div>
 
@@ -68,41 +70,41 @@ export default function ResetPassword() {
 
                     {success && (
                         <div className="login-error" style={{ background: 'rgba(34,197,94,0.14)', borderColor: 'rgba(34,197,94,0.35)', color: '#dcfce7' }}>
-                            <span>✓</span> Password updated. Redirecting to login...
+                            <span>✓</span> {t('auth.resetPasswordSuccess', 'Password updated. Redirecting to login...')}
                         </div>
                     )}
 
                     <form onSubmit={handleSubmit} className="login-form">
                         <div className="login-field">
-                            <label>New password</label>
+                            <label>{t('auth.newPassword', 'New password')}</label>
                             <input
                                 type="password"
                                 value={password}
                                 onChange={(e) => setPassword(e.target.value)}
                                 required
                                 autoFocus
-                                placeholder="At least 6 characters"
+                                placeholder={t('auth.newPasswordPlaceholder', 'At least 6 characters')}
                             />
                         </div>
 
                         <div className="login-field">
-                            <label>Confirm new password</label>
+                            <label>{t('auth.confirmNewPassword', 'Confirm new password')}</label>
                             <input
                                 type="password"
                                 value={confirmPassword}
                                 onChange={(e) => setConfirmPassword(e.target.value)}
                                 required
-                                placeholder="Repeat your new password"
+                                placeholder={t('auth.confirmNewPasswordPlaceholder', 'Repeat your new password')}
                             />
                         </div>
 
                         <button className="login-submit" type="submit" disabled={loading || success}>
-                            {loading ? <span className="login-spinner" /> : 'Update password'}
+                            {loading ? <span className="login-spinner" /> : t('auth.updatePassword', 'Update password')}
                         </button>
                     </form>
 
                     <div className="login-switch">
-                        <Link to="/login">Back to login</Link>
+                        <Link to="/login">{t('auth.backToLogin', 'Back to login')}</Link>
                     </div>
                 </div>
             </div>

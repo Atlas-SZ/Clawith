@@ -79,7 +79,27 @@
     "invitationHint": "Token consumption is significant, so invitation codes are required. We recommend deploying your own instance and configuring leading models for the best experience.",
     "usernamePlaceholder": "Enter username",
     "passwordPlaceholder": "Enter password",
-    "emailPlaceholder": "you@example.com"
+    "emailPlaceholder": "you@example.com",
+    "forgotPassword": "Forgot password?",
+    "forgotPasswordTitle": "Forgot password",
+    "forgotPasswordSubtitle": "Enter your account email and we will send a reset link if the account exists.",
+    "forgotPasswordRequestFailed": "Failed to request password reset",
+    "sendResetLink": "Send reset link",
+    "rememberedPassword": "Remembered your password?",
+    "backToLogin": "Back to login",
+    "resetPasswordTitle": "Reset password",
+    "resetPasswordSubtitle": "Choose a new password for your account.",
+    "resetPasswordMissingToken": "Reset token is missing from the link.",
+    "resetPasswordTooShort": "New password must be at least 6 characters.",
+    "resetPasswordMismatch": "Passwords do not match.",
+    "resetPasswordFailed": "Failed to reset password",
+    "resetPasswordSuccess": "Password updated. Redirecting to login...",
+    "newPassword": "New password",
+    "newPasswordPlaceholder": "At least 6 characters",
+    "confirmNewPassword": "Confirm new password",
+    "confirmNewPasswordPlaceholder": "Repeat your new password",
+    "updatePassword": "Update password",
+    "emailPlaceholderReset": "name@company.com"
   },
   "roles": {
     "platformAdmin": "Platform Admin",
@@ -754,6 +774,15 @@
       "save": "Save",
       "saved": "Saved",
       "themeColor": "Theme Color"
+    },
+    "broadcast": {
+      "title": "Broadcast Notification",
+      "description": "Send a notification to all users and agents in this company.",
+      "titlePlaceholder": "Notification title",
+      "bodyPlaceholder": "Optional details...",
+      "sendEmail": "Also send email to users with a configured address",
+      "send": "Send Broadcast",
+      "sentWithEmail": "Sent to {{users}} users, {{agents}} agents, and {{emails}} email recipients"
     },
     "kb": {
       "title": "Company Knowledge Base",

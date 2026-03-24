@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { authApi } from '../services/api';
 
 export default function ForgotPassword() {
+    const { t } = useTranslation();
     const [email, setEmail] = useState('');
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
@@ -22,7 +24,7 @@ export default function ForgotPassword() {
             const res = await authApi.forgotPassword({ email: email.trim() });
             setMessage(res.message);
         } catch (err: any) {
-            setError(err.message || 'Failed to request password reset');
+            setError(err.message || t('auth.forgotPasswordRequestFailed', 'Failed to request password reset'));
         } finally {
             setLoading(false);
         }
@@ -37,9 +39,9 @@ export default function ForgotPassword() {
                             <img src="/logo-black.png" className="login-logo-img" alt="" style={{ width: 28, height: 28, marginRight: 8, verticalAlign: 'middle' }} />
                             Clawith
                         </div>
-                        <h2 className="login-form-title">Forgot password</h2>
+                        <h2 className="login-form-title">{t('auth.forgotPasswordTitle', 'Forgot password')}</h2>
                         <p className="login-form-subtitle">
-                            Enter your account email and we will send a reset link if the account exists.
+                            {t('auth.forgotPasswordSubtitle', 'Enter your account email and we will send a reset link if the account exists.')}
                         </p>
                     </div>
 
@@ -57,24 +59,24 @@ export default function ForgotPassword() {
 
                     <form onSubmit={handleSubmit} className="login-form">
                         <div className="login-field">
-                            <label>Email</label>
+                            <label>{t('auth.email', 'Email')}</label>
                             <input
                                 type="email"
                                 value={email}
                                 onChange={(e) => setEmail(e.target.value)}
                                 required
                                 autoFocus
-                                placeholder="name@company.com"
+                                placeholder={t('auth.emailPlaceholderReset', 'name@company.com')}
                             />
                         </div>
 
                         <button className="login-submit" type="submit" disabled={loading || !email.trim()}>
-                            {loading ? <span className="login-spinner" /> : 'Send reset link'}
+                            {loading ? <span className="login-spinner" /> : t('auth.sendResetLink', 'Send reset link')}
                         </button>
                     </form>
 
                     <div className="login-switch">
-                        Remembered your password? <Link to="/login">Back to login</Link>
+                        {t('auth.rememberedPassword', 'Remembered your password?')} <Link to="/login">{t('auth.backToLogin', 'Back to login')}</Link>
                     </div>
                 </div>
             </div>
