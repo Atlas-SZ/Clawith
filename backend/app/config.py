@@ -62,10 +62,20 @@ class Settings(BaseSettings):
     JWT_SECRET_KEY: str = "change-me-jwt-secret"
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
+    PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = 60
 
     # File Storage
     AGENT_DATA_DIR: str = _default_agent_data_dir()
     AGENT_TEMPLATE_DIR: str = "/app/agent_template"
+
+    # System email (platform-owned outbound mail)
+    SYSTEM_EMAIL_FROM_ADDRESS: str = ""
+    SYSTEM_EMAIL_FROM_NAME: str = "Clawith"
+    SYSTEM_SMTP_HOST: str = ""
+    SYSTEM_SMTP_PORT: int = 465
+    SYSTEM_SMTP_USERNAME: str = ""
+    SYSTEM_SMTP_PASSWORD: str = ""
+    SYSTEM_SMTP_SSL: bool = True
 
     # Docker (for Agent containers)
     DOCKER_NETWORK: str = "clawith_network"
@@ -76,6 +86,7 @@ class Settings(BaseSettings):
     FEISHU_APP_ID: str = ""
     FEISHU_APP_SECRET: str = ""
     FEISHU_REDIRECT_URI: str = ""
+    PUBLIC_BASE_URL: str = ""
 
     # CORS
     CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:5173"]

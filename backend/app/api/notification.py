@@ -116,6 +116,7 @@ async def mark_all_read(
 class BroadcastRequest(BaseModel):
     title: str = Field(..., max_length=200)
     body: str = Field("", max_length=1000)
+    send_email: bool = False
 
 
 @router.post("/notifications/broadcast")
@@ -138,12 +139,22 @@ async def broadcast_notification(
     sender_name = current_user.display_name or current_user.username or "Admin"
     count_users = 0
     count_agents = 0
+    count_emails = 0
+
+    if req.send_email:
+        from app.services.system_email_service import get_system_email_config
+
+        try:
+            get_system_email_config()
+        except Exception as exc:
+            raise HTTPException(400, f"System email is not configured: {exc}")
 
     # Notify all users in tenant
     users_result = await db.execute(
         select(User).where(User.tenant_id == tenant_id, User.id != current_user.id)
     )
-    for user in users_result.scalars().all():
+    users = users_result.scalars().all()
+    for user in users:
         await send_notification(
             db, user_id=user.id,
             type="broadcast",
@@ -167,6 +178,28 @@ async def broadcast_notification(
         )
         count_agents += 1
 
-    await db.commit()
-    return {"ok": True, "users_notified": count_users, "agents_notified": count_agents}
+    if req.send_email:
+        from app.services.system_email_service import send_system_email
 
+        for user in users:
+            if not user.email:
+                continue
+            await send_system_email(
+                user.email,
+                req.title,
+                (
+                    f"{req.body}\n\n"
+                    f"Sent by: {sender_name}"
+                    if req.body.strip()
+                    else f"Sent by: {sender_name}"
+                ),
+            )
+            count_emails += 1
+
+    await db.commit()
+    return {
+        "ok": True,
+        "users_notified": count_users,
+        "agents_notified": count_agents,
+        "emails_sent": count_emails,
+    }

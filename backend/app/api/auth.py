@@ -1,6 +1,6 @@
 """Authentication API routes."""
 
-import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from loguru import logger
@@ -9,8 +9,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import create_access_token, get_current_user, hash_password, verify_password
 from app.database import get_db
+from app.models.password_reset_token import PasswordResetToken
 from app.models.user import User
-from app.schemas.schemas import TokenResponse, UserLogin, UserOut, UserRegister, UserUpdate
+from app.schemas.schemas import (
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
+    TokenResponse,
+    UserLogin,
+    UserOut,
+    UserRegister,
+    UserUpdate,
+)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -139,6 +148,71 @@ async def login(data: UserLogin, db: AsyncSession = Depends(get_db)):
         user=UserOut.model_validate(user),
         needs_company_setup=needs_setup,
     )
+
+
+@router.post("/forgot-password")
+async def forgot_password(data: ForgotPasswordRequest, db: AsyncSession = Depends(get_db)):
+    """Request a password reset link without revealing account existence."""
+    generic_response = {
+        "ok": True,
+        "message": "If an account with that email exists, a password reset email has been sent.",
+    }
+
+    result = await db.execute(select(User).where(User.email == data.email))
+    user = result.scalar_one_or_none()
+    if not user or not user.is_active:
+        return generic_response
+
+    try:
+        from app.services.password_reset_service import build_password_reset_url, create_password_reset_token
+        from app.services.system_email_service import send_system_email
+
+        raw_token, expires_at = await create_password_reset_token(db, user.id)
+        await db.commit()
+
+        reset_url = await build_password_reset_url(db, raw_token)
+        expiry_minutes = int((expires_at - datetime.now(timezone.utc)).total_seconds() // 60)
+        await send_system_email(
+            user.email,
+            "Reset your Clawith password",
+            (
+                f"Hello {user.display_name or user.username},\n\n"
+                f"We received a request to reset your Clawith password.\n\n"
+                f"Reset link: {reset_url}\n\n"
+                f"This link expires in {expiry_minutes} minutes. If you did not request this, you can ignore this email."
+            ),
+        )
+    except Exception as exc:
+        logger.warning(f"Failed to process password reset email for {data.email}: {exc}")
+
+    return generic_response
+
+
+@router.post("/reset-password")
+async def reset_password(data: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
+    """Reset a password using a valid single-use token."""
+    from app.services.password_reset_service import consume_password_reset_token
+
+    token = await consume_password_reset_token(db, data.token)
+    if not token:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+
+    result = await db.execute(select(User).where(User.id == token.user_id))
+    user = result.scalar_one_or_none()
+    if not user or not user.is_active:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+
+    user.password_hash = hash_password(data.new_password)
+
+    # Invalidate any other older token rows for the same user.
+    other_tokens = await db.execute(select(PasswordResetToken).where(PasswordResetToken.user_id == user.id))
+    now = datetime.now(timezone.utc)
+    for row in other_tokens.scalars().all():
+        if row.id != token.id and row.used_at is None:
+            row.used_at = now
+
+    await db.flush()
+    return {"ok": True}
 
 
 @router.get("/me", response_model=UserOut)

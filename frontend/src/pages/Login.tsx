@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '../stores';
 import { authApi } from '../services/api';
@@ -180,6 +180,17 @@ export default function Login() {
                                 placeholder={t('auth.passwordPlaceholder')}
                             />
                         </div>
+
+                        {!isRegister && (
+                            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '-4px', marginBottom: '8px' }}>
+                                <Link
+                                    to="/forgot-password"
+                                    style={{ fontSize: '13px', color: 'var(--accent-primary)', textDecoration: 'none' }}
+                                >
+                                    {t('auth.forgotPassword', 'Forgot password?')}
+                                </Link>
+                            </div>
+                        )}
 
                         <button className="login-submit" type="submit" disabled={loading}>
                             {loading ? (

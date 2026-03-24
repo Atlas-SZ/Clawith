@@ -923,8 +923,9 @@ function BroadcastSection() {
     const { t } = useTranslation();
     const [title, setTitle] = useState('');
     const [body, setBody] = useState('');
+    const [sendEmail, setSendEmail] = useState(false);
     const [sending, setSending] = useState(false);
-    const [result, setResult] = useState<{ users: number; agents: number } | null>(null);
+    const [result, setResult] = useState<{ users: number; agents: number; emails: number } | null>(null);
 
     const handleSend = async () => {
         if (!title.trim()) return;
@@ -935,7 +936,7 @@ function BroadcastSection() {
             const res = await fetch('/api/notifications/broadcast', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-                body: JSON.stringify({ title: title.trim(), body: body.trim() }),
+                body: JSON.stringify({ title: title.trim(), body: body.trim(), send_email: sendEmail }),
             });
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}));
@@ -944,9 +945,14 @@ function BroadcastSection() {
                 return;
             }
             const data = await res.json();
-            setResult({ users: data.users_notified, agents: data.agents_notified });
+            setResult({
+                users: data.users_notified,
+                agents: data.agents_notified,
+                emails: data.emails_sent || 0,
+            });
             setTitle('');
             setBody('');
+            setSendEmail(false);
         } catch (e: any) {
             alert(e.message || 'Failed');
         }
@@ -977,13 +983,25 @@ function BroadcastSection() {
                     rows={3}
                     style={{ resize: 'vertical', fontSize: '13px', marginBottom: '12px' }}
                 />
+                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px', fontSize: '13px' }}>
+                    <input
+                        type="checkbox"
+                        checked={sendEmail}
+                        onChange={e => setSendEmail(e.target.checked)}
+                    />
+                    <span>{t('enterprise.broadcast.sendEmail', 'Also send email to users with a configured address')}</span>
+                </label>
                 <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                     <button className="btn btn-primary" onClick={handleSend} disabled={sending || !title.trim()}>
                         {sending ? t('common.loading') : t('enterprise.broadcast.send', 'Send Broadcast')}
                     </button>
                     {result && (
                         <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                            {t('enterprise.broadcast.sent', `Sent to ${result.users} users and ${result.agents} agents`, { users: result.users, agents: result.agents })}
+                            {t(
+                                'enterprise.broadcast.sentWithEmail',
+                                `Sent to ${result.users} users, ${result.agents} agents, and ${result.emails} email recipients`,
+                                { users: result.users, agents: result.agents, emails: result.emails },
+                            )}
                         </span>
                     )}
                 </div>
