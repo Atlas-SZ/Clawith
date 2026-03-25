@@ -7,15 +7,15 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
-
 from app.core.security import decode_access_token
 from app.core.permissions import check_agent_access, is_agent_expired
 from app.database import async_session
-from app.models.agent import Agent
 from app.models.audit import ChatMessage
 from app.models.llm import LLMModel
 from app.models.user import User
+from fastapi import Depends
+from app.core.security import get_current_user
+from app.database import get_db
 
 router = APIRouter(tags=["websocket"])
 
@@ -52,12 +52,6 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
-
-
-from fastapi import Depends
-from app.core.security import get_current_user
-from app.database import get_db
-from app.models.user import User
 
 
 @router.get("/api/chat/{agent_id}/history")
@@ -149,7 +143,19 @@ async def call_llm(
                     _current_user_name = _u.display_name or _u.username
         except Exception:
             pass
-    system_prompt = await build_agent_context(agent_id, agent_name, role_description, current_user_name=_current_user_name)
+    activation_hint = ""
+    for msg in reversed(messages):
+        if msg.get("role") == "user" and isinstance(msg.get("content"), str):
+            activation_hint = msg["content"]
+            break
+
+    system_prompt = await build_agent_context(
+        agent_id,
+        agent_name,
+        role_description,
+        current_user_name=_current_user_name,
+        activation_hint=activation_hint,
+    )
 
     # Load tools dynamically from DB
     tools_for_llm = await get_agent_tools_for_llm(agent_id) if agent_id else AGENT_TOOLS
@@ -244,7 +250,7 @@ async def call_llm(
         elif round_i == _warn_threshold_96:
             api_messages.append(LLMMessage(
                 role="user",
-                content=f"🚨 仅剩 2 轮工具调用。请立即保存进度到 focus.md 并设置续接触发器。",
+                content="🚨 仅剩 2 轮工具调用。请立即保存进度到 focus.md 并设置续接触发器。",
             ))
 
         try:
@@ -595,7 +601,7 @@ async def websocket_chat(
             try:
                 from app.services.quota_guard import (
                     check_conversation_quota, increment_conversation_usage,
-                    check_agent_expired, check_agent_llm_quota, increment_agent_llm_usage,
+                    check_agent_expired, increment_agent_llm_usage,
                     QuotaExceeded, AgentExpired,
                 )
                 await check_conversation_quota(user_id)
@@ -748,7 +754,7 @@ async def websocket_chat(
                                 websocket.receive_json(), timeout=0.5
                             )
                             if msg.get("type") == "abort":
-                                logger.info(f"[WS] Abort received, cancelling LLM task")
+                                logger.info("[WS] Abort received, cancelling LLM task")
                                 llm_task.cancel()
                                 aborted = True
                                 break

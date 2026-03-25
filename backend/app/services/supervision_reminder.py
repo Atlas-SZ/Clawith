@@ -127,7 +127,10 @@ async def _get_agent_reply(target_agent, message: str, db) -> str | None:
         return None
 
     system_prompt = await build_agent_context(
-        target_agent.id, target_agent.name, target_agent.role_description or ""
+        target_agent.id,
+        target_agent.name,
+        target_agent.role_description or "",
+        activation_hint=message,
     )
 
     messages = [
@@ -185,7 +188,7 @@ async def _send_supervision_reminder(task: Task, agent_name: str):
         reminder_msg += f"创建于：{days_since} 天前\n"
         if task.due_date:
             reminder_msg += f"截止日期：{task.due_date.strftime('%Y-%m-%d')}\n"
-        reminder_msg += f"\n请及时处理，谢谢！"
+        reminder_msg += "\n请及时处理，谢谢！"
 
         async with async_session() as db:
             sent = False

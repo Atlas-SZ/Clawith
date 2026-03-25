@@ -173,9 +173,6 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
                     break
 
             # Build context
-            from app.services.agent_context import build_agent_context
-            system_prompt = await build_agent_context(agent_id, agent.name, agent.role_description or "")
-
             # Fetch recent activity to give heartbeat context for curiosity exploration
             from app.models.activity_log import AgentActivityLog
             recent_context = ""
@@ -204,7 +201,7 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
                 notif_result = await db.execute(
                     select(Notification).where(
                         Notification.agent_id == agent_id,
-                        Notification.is_read == False,
+                        ~Notification.is_read,
                     ).order_by(Notification.created_at).limit(10)
                 )
                 unread = notif_result.scalars().all()
@@ -220,6 +217,14 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
                 logger.warning(f"Failed to drain agent notifications: {e}")
 
             full_instruction = heartbeat_instruction + recent_context + inbox_context
+
+            from app.services.agent_context import build_agent_context
+            system_prompt = await build_agent_context(
+                agent_id,
+                agent.name,
+                agent.role_description or "",
+                activation_hint=full_instruction,
+            )
 
             messages = [
                 {"role": "system", "content": system_prompt},
@@ -392,7 +397,7 @@ async def _heartbeat_tick():
         async with async_session() as db:
             result = await db.execute(
                 select(Agent).where(
-                    Agent.heartbeat_enabled == True,
+                    Agent.heartbeat_enabled,
                     Agent.status.in_(["running", "idle"]),
                 )
             )

@@ -4,8 +4,12 @@ Loads soul, memory, skills summary, and relationships from the agent's
 workspace files and composes a comprehensive system prompt.
 """
 
+import re
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
+
+import yaml
 
 from app.config import get_settings
 
@@ -14,6 +18,26 @@ settings = get_settings()
 # Two workspace roots exist — tool workspace and persistent data
 TOOL_WORKSPACE = Path("/tmp/clawith_workspaces")
 PERSISTENT_DATA = Path(settings.AGENT_DATA_DIR)
+
+_MATCH_STOP_WORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "how", "i", "if", "in", "into",
+    "is", "it", "latest", "me", "my", "of", "on", "or", "our", "please", "should", "show", "summarize",
+    "tell", "that", "the", "this", "to", "update", "use", "using", "want", "what", "when", "with", "you",
+}
+_MAX_ACTIVATED_SKILLS = 2
+_MAX_SKILL_BODY_CHARS = 2200
+_MAX_AUX_FILES = 6
+
+
+@dataclass
+class SkillPromptEntry:
+    name: str
+    description: str
+    rel_path: str
+    content: str
+    keywords: tuple[str, ...]
+    auxiliary_files: tuple[str, ...]
+    disable_model_invocation: bool = False
 
 
 def _read_file_safe(path: Path, max_chars: int = 3000) -> str:
@@ -73,18 +97,100 @@ def _parse_skill_frontmatter(content: str, filename: str) -> tuple[str, str]:
     return name, description
 
 
-def _load_skills_index(agent_id: uuid.UUID) -> str:
-    """Load skill index (name + description) from skills/ directory.
+def _parse_skill_frontmatter_data(content: str) -> dict:
+    """Parse YAML frontmatter into a dict."""
+    stripped = content.strip()
+    if not stripped.startswith("---"):
+        return {}
+    match = re.match(r"^---\s*\n(.*?)\n---", stripped, re.DOTALL)
+    if not match:
+        return {}
+    try:
+        data = yaml.safe_load(match.group(1)) or {}
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
 
-    Supports two formats:
-    - Flat file:   skills/my-skill.md
-    - Folder:      skills/my-skill/SKILL.md  (Claude-style, with optional scripts/, references/)
 
-    Uses progressive disclosure: only name+description go into the system
-    prompt. The model is instructed to call read_file to load full content
-    when a skill is relevant.
-    """
-    skills: list[tuple[str, str, str]] = []  # (name, description, path_relative_to_skills)
+def _strip_skill_frontmatter(content: str) -> str:
+    stripped = content.strip()
+    if not stripped.startswith("---"):
+        return stripped
+    match = re.match(r"^---\s*\n.*?\n---\s*", stripped, re.DOTALL)
+    if not match:
+        return stripped
+    return stripped[match.end():].strip()
+
+
+def _parse_bool_frontmatter(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "1", "on"}:
+            return True
+        if normalized in {"false", "no", "0", "off"}:
+            return False
+    return default
+
+
+def _normalize_match_text(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+
+def _tokenize_match_text(text: str) -> set[str]:
+    return {
+        token
+        for token in _normalize_match_text(text).split()
+        if len(token) >= 3 and token not in _MATCH_STOP_WORDS
+    }
+
+
+def _extract_skill_keywords(content: str, frontmatter: dict) -> tuple[str, ...]:
+    keywords: list[str] = []
+    raw_frontmatter_keywords = frontmatter.get("keywords")
+    if isinstance(raw_frontmatter_keywords, str):
+        keywords.extend(part.strip() for part in raw_frontmatter_keywords.split(","))
+    elif isinstance(raw_frontmatter_keywords, list):
+        keywords.extend(str(part).strip() for part in raw_frontmatter_keywords)
+
+    for line in _strip_skill_frontmatter(content).splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        keyword_match = re.match(r"^\*{0,2}keywords\*{0,2}\s*:\s*(.+)$", line, re.IGNORECASE)
+        if keyword_match:
+            keywords.extend(part.strip() for part in keyword_match.group(1).split(","))
+            break
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for keyword in keywords:
+        normalized = " ".join(_normalize_match_text(keyword).split())
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            deduped.append(normalized)
+    return tuple(deduped)
+
+
+def _build_skill_entry(entry: Path, rel_path: str, content: str, auxiliary_files: tuple[str, ...]) -> SkillPromptEntry:
+    frontmatter = _parse_skill_frontmatter_data(content)
+    name, description = _parse_skill_frontmatter(content, entry.stem if entry.is_file() else entry.name)
+    return SkillPromptEntry(
+        name=name,
+        description=description,
+        rel_path=rel_path,
+        content=content.strip(),
+        keywords=_extract_skill_keywords(content, frontmatter),
+        auxiliary_files=auxiliary_files,
+        disable_model_invocation=_parse_bool_frontmatter(frontmatter.get("disable-model-invocation"), default=False),
+    )
+
+
+def _load_skill_entries(agent_id: uuid.UUID) -> list[SkillPromptEntry]:
+    """Load full skill entries from the agent workspace."""
+    entries: list[SkillPromptEntry] = []
+    seen_names: set[str] = set()
     for ws_root in [TOOL_WORKSPACE / str(agent_id), PERSISTENT_DATA / str(agent_id)]:
         skills_dir = ws_root / "skills"
         if not skills_dir.exists():
@@ -93,61 +199,143 @@ def _load_skills_index(agent_id: uuid.UUID) -> str:
             if entry.name.startswith("."):
                 continue
 
-            # Case 1: Folder-based skill — skills/<folder>/SKILL.md
             if entry.is_dir():
                 skill_md = entry / "SKILL.md"
                 if not skill_md.exists():
-                    # Also try lowercase skill.md
                     skill_md = entry / "skill.md"
-                if skill_md.exists():
-                    try:
-                        content = skill_md.read_text(encoding="utf-8", errors="replace").strip()
-                        name, desc = _parse_skill_frontmatter(content, entry.name)
-                        skills.append((name, desc, f"{entry.name}/SKILL.md"))
-                    except Exception:
-                        skills.append((entry.name, "", f"{entry.name}/SKILL.md"))
-
-            # Case 2: Flat file — skills/<name>.md
+                if not skill_md.exists():
+                    continue
+                try:
+                    content = skill_md.read_text(encoding="utf-8", errors="replace").strip()
+                except Exception:
+                    continue
+                auxiliary_files = tuple(
+                    str(path.relative_to(entry))
+                    for path in sorted(entry.rglob("*"))
+                    if path.is_file() and path.name.lower() != "skill.md" and not path.name.startswith(".")
+                )
+                skill_entry = _build_skill_entry(entry, f"{entry.name}/SKILL.md", content, auxiliary_files)
             elif entry.suffix == ".md" and entry.is_file():
                 try:
                     content = entry.read_text(encoding="utf-8", errors="replace").strip()
-                    name, desc = _parse_skill_frontmatter(content, entry.stem)
-                    skills.append((name, desc, entry.name))
                 except Exception:
-                    skills.append((entry.stem, "", entry.name))
+                    continue
+                skill_entry = _build_skill_entry(entry, entry.name, content, ())
+            else:
+                continue
 
-    # Deduplicate by name
-    seen: set[str] = set()
-    unique: list[tuple[str, str, str]] = []
-    for s in skills:
-        if s[0] not in seen:
-            seen.add(s[0])
-            unique.append(s)
+            if skill_entry.name in seen_names or skill_entry.disable_model_invocation:
+                continue
+            seen_names.add(skill_entry.name)
+            entries.append(skill_entry)
 
-    if not unique:
+    return entries
+
+
+def _score_skill_match(skill: SkillPromptEntry, activation_hint: str) -> int:
+    if not activation_hint.strip():
+        return 0
+
+    hint_normalized = f" {_normalize_match_text(activation_hint)} "
+    hint_tokens = _tokenize_match_text(activation_hint)
+    if not hint_tokens:
+        return 0
+
+    score = 0
+    name_tokens = _tokenize_match_text(skill.name)
+    description_tokens = _tokenize_match_text(skill.description)
+    keyword_tokens = set().union(*(_tokenize_match_text(keyword) for keyword in skill.keywords)) if skill.keywords else set()
+
+    for phrase in {skill.name, Path(skill.rel_path).parent.name, *skill.keywords}:
+        normalized_phrase = " ".join(_normalize_match_text(phrase).split())
+        if normalized_phrase and f" {normalized_phrase} " in hint_normalized:
+            score += 8 if phrase == skill.name else 5
+
+    score += 3 * len(hint_tokens & keyword_tokens)
+    score += 2 * len(hint_tokens & name_tokens)
+    score += len(hint_tokens & description_tokens)
+
+    if score < 4:
+        return 0
+    return score
+
+
+def _select_activated_skills(skill_entries: list[SkillPromptEntry], activation_hint: str | None) -> list[SkillPromptEntry]:
+    if not activation_hint:
+        return []
+
+    ranked = [
+        (skill, _score_skill_match(skill, activation_hint))
+        for skill in skill_entries
+    ]
+    ranked = [(skill, score) for skill, score in ranked if score > 0]
+    ranked.sort(key=lambda item: (-item[1], item[0].name.lower()))
+    return [skill for skill, _score in ranked[:_MAX_ACTIVATED_SKILLS]]
+
+
+def _format_activated_skills_text(skill_entries: list[SkillPromptEntry]) -> str:
+    if not skill_entries:
         return ""
 
-    # Build index table
+    lines = [
+        "## Activated Skills For Current Request",
+        "The following skills strongly match the current request and are preloaded.",
+        "Follow these skill instructions before falling back to generic reasoning.",
+    ]
+    for skill in skill_entries:
+        lines.append(f"\n### {skill.name}")
+        lines.append(f"- File: skills/{skill.rel_path}")
+        if skill.description:
+            lines.append(f"- Description: {skill.description}")
+        if skill.auxiliary_files:
+            aux_list = ", ".join(f"skills/{Path(skill.rel_path).parent}/{name}" for name in skill.auxiliary_files[:_MAX_AUX_FILES])
+            lines.append(f"- Auxiliary files: {aux_list}")
+        body = skill.content
+        if len(body) > _MAX_SKILL_BODY_CHARS:
+            body = body[:_MAX_SKILL_BODY_CHARS].rstrip() + "\n...(truncated)"
+        lines.append("```md")
+        lines.append(body)
+        lines.append("```")
+    return "\n".join(lines)
+
+
+def _build_skill_prompt_sections(agent_id: uuid.UUID, activation_hint: str | None = None) -> tuple[str, str]:
+    skill_entries = _load_skill_entries(agent_id)
+    if not skill_entries:
+        return "", ""
+
     lines = [
         "You have the following skills available. Each skill defines specific instructions for a task domain.",
         "",
         "| Skill | Description | File |",
         "|-------|-------------|------|",
     ]
-    for name, desc, rel_path in unique:
-        lines.append(f"| {name} | {desc} | skills/{rel_path} |")
+    for skill in skill_entries:
+        lines.append(f"| {skill.name} | {skill.description} | skills/{skill.rel_path} |")
 
     lines.append("")
     lines.append("⚠️ SKILL USAGE RULES:")
-    lines.append("1. When a user request matches a skill, FIRST call `read_file` with the File path above to load the full instructions.")
+    lines.append("1. When a user request matches a skill, FIRST call `read_file` with the File path above to load the full instructions unless the skill is already preloaded below.")
     lines.append("2. Follow the loaded instructions to complete the task.")
-    lines.append("3. Do NOT guess what the skill contains — always read it first.")
+    lines.append("3. Do NOT guess what the skill contains — always read it first when it is not preloaded.")
     lines.append("4. Folder-based skills may contain auxiliary files (scripts/, references/, examples/). Use `list_files` on the skill folder to discover them.")
 
-    return "\n".join(lines)
+    activated_skills_text = _format_activated_skills_text(_select_activated_skills(skill_entries, activation_hint))
+    return "\n".join(lines), activated_skills_text
 
 
-async def build_agent_context(agent_id: uuid.UUID, agent_name: str, role_description: str = "", current_user_name: str = None) -> str:
+def _load_skills_index(agent_id: uuid.UUID) -> str:
+    skills_text, _activated_skills_text = _build_skill_prompt_sections(agent_id)
+    return skills_text
+
+
+async def build_agent_context(
+    agent_id: uuid.UUID,
+    agent_name: str,
+    role_description: str = "",
+    current_user_name: str = None,
+    activation_hint: str | None = None,
+) -> str:
     """Build a rich system prompt incorporating agent's full context.
 
     Reads from workspace files:
@@ -171,7 +359,7 @@ async def build_agent_context(agent_id: uuid.UUID, agent_name: str, role_descrip
         memory = "\n".join(memory.split("\n")[1:]).strip()
 
     # --- Skills index (progressive disclosure) ---
-    skills_text = _load_skills_index(agent_id)
+    skills_text, activated_skills_text = _build_skill_prompt_sections(agent_id, activation_hint=activation_hint)
 
     # --- Relationships ---
     relationships = _read_file_safe(data_ws / "relationships.md", 2000)
@@ -179,8 +367,8 @@ async def build_agent_context(agent_id: uuid.UUID, agent_name: str, role_descrip
         relationships = "\n".join(relationships.split("\n")[1:]).strip()
 
     # --- Compose system prompt ---
-    from datetime import datetime, timezone as _tz
     from app.services.timezone_utils import get_agent_timezone, now_in_timezone
+    from sqlalchemy import select
     agent_tz_name = await get_agent_timezone(agent_id)
     agent_local_now = now_in_timezone(agent_tz_name)
     now_str = agent_local_now.strftime(f"%Y-%m-%d %H:%M:%S ({agent_tz_name})")
@@ -201,7 +389,7 @@ async def build_agent_context(agent_id: uuid.UUID, agent_name: str, role_descrip
                 select(ChannelConfig).where(
                     ChannelConfig.agent_id == agent_id,
                     ChannelConfig.channel_type == "feishu",
-                    ChannelConfig.is_configured == True,
+                    ChannelConfig.is_configured,
                 )
             )
             _has_feishu = _cfg_r.scalar_one_or_none() is not None
@@ -282,7 +470,7 @@ When user asks to create a Feishu document (summarize PDF, write an article, etc
                 sa_select(ChannelConfig).where(
                     ChannelConfig.agent_id == agent_id,
                     ChannelConfig.channel_type == "atlassian",
-                    ChannelConfig.is_configured == True,
+                    ChannelConfig.is_configured,
                 )
             )
             atlassian_config = result.scalar_one_or_none()
@@ -329,6 +517,7 @@ You have access to Atlassian tools via the Rovo MCP server. **Always call them v
     # --- Company Intro (from system settings) ---
     try:
         from app.database import async_session
+        from app.models.agent import Agent as _AgentModel
         from app.models.system_settings import SystemSetting
         from sqlalchemy import select as sa_select
         async with async_session() as db:
@@ -384,6 +573,9 @@ You have access to Atlassian tools via the Rovo MCP server. **Always call them v
     if memory and memory not in ("_这里记录重要的信息和学到的知识。_", "_Record important information and knowledge here._"):
         parts.append(f"\n## Memory\n{memory}")
 
+    if activated_skills_text:
+        parts.append(f"\n{activated_skills_text}")
+
     if skills_text:
         parts.append(f"\n## Skills\n{skills_text}")
 
@@ -412,7 +604,7 @@ You have access to Atlassian tools via the Rovo MCP server. **Always call them v
             result = await db.execute(
                 sa_select(AgentTrigger).where(
                     AgentTrigger.agent_id == agent_id,
-                    AgentTrigger.is_enabled == True,
+                    AgentTrigger.is_enabled,
                 )
             )
             triggers = result.scalars().all()

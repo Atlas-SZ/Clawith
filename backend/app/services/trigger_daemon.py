@@ -434,7 +434,12 @@ async def _invoke_agent_for_triggers(agent_id: uuid.UUID, triggers: list[AgentTr
             session_id = session.id
 
             # Build system prompt
-            system_prompt = await build_agent_context(agent_id, agent.name, agent.role_description or "")
+            system_prompt = await build_agent_context(
+                agent_id,
+                agent.name,
+                agent.role_description or "",
+                activation_hint=trigger_context,
+            )
 
             # Messages: system + trigger context
             messages = [
@@ -614,7 +619,7 @@ async def _tick():
 
     async with async_session() as db:
         result = await db.execute(
-            select(AgentTrigger).where(AgentTrigger.is_enabled == True)
+            select(AgentTrigger).where(AgentTrigger.is_enabled)
         )
         all_triggers = result.scalars().all()
 

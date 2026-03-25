@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 
 from croniter import croniter
 from loguru import logger
-from sqlalchemy import select, update
+from sqlalchemy import select
 
 
 def compute_next_run(cron_expr: str, after: datetime | None = None) -> datetime | None:
@@ -66,11 +66,17 @@ async def _execute_schedule(schedule_id: uuid.UUID, agent_id: uuid.UUID, instruc
             from app.services.agent_tools import execute_tool, get_agent_tools_for_llm
             from app.services.llm_utils import create_llm_client, get_max_tokens, LLMMessage, LLMError
 
-            system_prompt = await build_agent_context(agent_id, agent.name, agent.role_description or "")
+            activation_hint = f"[自动调度任务] {instruction}"
+            system_prompt = await build_agent_context(
+                agent_id,
+                agent.name,
+                agent.role_description or "",
+                activation_hint=activation_hint,
+            )
 
             messages = [
                 LLMMessage(role="system", content=system_prompt),
-                LLMMessage(role="user", content=f"[自动调度任务] {instruction}"),
+                LLMMessage(role="user", content=activation_hint),
             ]
 
             # Load tools dynamically from DB (respects per-agent config and MCP tools)
@@ -190,7 +196,7 @@ async def _tick():
         async with async_session() as db:
             result = await db.execute(
                 select(AgentSchedule).where(
-                    AgentSchedule.is_enabled == True,
+                    AgentSchedule.is_enabled,
                     AgentSchedule.next_run_at <= now,
                 )
             )

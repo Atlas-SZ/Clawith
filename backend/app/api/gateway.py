@@ -10,9 +10,9 @@ import secrets
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Header, HTTPException, Depends, BackgroundTasks
+from fastapi import APIRouter, Header, HTTPException, Depends
 from loguru import logger
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db, async_session
@@ -72,7 +72,6 @@ async def generate_api_key(
 
     Called from the frontend by the agent creator.
     """
-    from app.api.agents import get_current_user
     raise HTTPException(status_code=501, detail="Use the /agents/{id}/api-key endpoint instead")
 
 
@@ -405,7 +404,10 @@ async def _send_to_agent_background(
 
             # Build system prompt for target agent
             system_prompt = await build_agent_context(
-                target_agent_id, target_agent_name, target_role_description
+                target_agent_id,
+                target_agent_name,
+                target_role_description,
+                activation_hint=f"[Message from agent: {source_agent_name}]\n{content}",
             )
             system_prompt += (
                 "\n\n--- Agent-to-Agent Communication Alert ---\n"

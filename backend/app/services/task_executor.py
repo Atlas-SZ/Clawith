@@ -4,7 +4,6 @@ Uses the same agent context (soul, memory, skills, relationships, tools)
 as the chat dialog. Supports tool-calling loop for autonomous execution.
 """
 
-import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
@@ -77,8 +76,27 @@ async def execute_task(task_id: uuid.UUID, agent_id: uuid.UUID) -> None:
         creator_id = agent.creator_id
 
     # Step 3: Build full agent context (same as chat dialog)
+    # Build user prompt
+    if task_type == 'supervision':
+        user_prompt = f"[督办任务] {task_title}"
+        if task_description:
+            user_prompt += f"\n任务描述: {task_description}"
+        if supervision_target:
+            user_prompt += f"\n督办对象: {supervision_target}"
+        user_prompt += "\n\n请执行此督办任务：联系督办对象，了解进展，并汇报结果。"
+    else:
+        user_prompt = f"[任务执行] {task_title}"
+        if task_description:
+            user_prompt += f"\n任务描述: {task_description}"
+        user_prompt += "\n\n请认真完成此任务，给出详细的执行结果。"
+
     from app.services.agent_context import build_agent_context
-    system_prompt = await build_agent_context(agent_id, agent_name, agent.role_description or "")
+    system_prompt = await build_agent_context(
+        agent_id,
+        agent_name,
+        agent.role_description or "",
+        activation_hint=user_prompt,
+    )
 
     # Add task-execution-specific instructions
     task_addendum = """
@@ -95,20 +113,6 @@ You are now in TASK EXECUTION MODE (not a conversation). A task has been assigne
 - Do NOT ask the user follow-up questions — take initiative and complete the task autonomously.
 """
     system_prompt += task_addendum
-
-    # Build user prompt
-    if task_type == 'supervision':
-        user_prompt = f"[督办任务] {task_title}"
-        if task_description:
-            user_prompt += f"\n任务描述: {task_description}"
-        if supervision_target:
-            user_prompt += f"\n督办对象: {supervision_target}"
-        user_prompt += "\n\n请执行此督办任务：联系督办对象，了解进展，并汇报结果。"
-    else:
-        user_prompt = f"[任务执行] {task_title}"
-        if task_description:
-            user_prompt += f"\n任务描述: {task_description}"
-        user_prompt += "\n\n请认真完成此任务，给出详细的执行结果。"
 
     # Step 4: Call LLM with tool loop
     from app.services.llm_utils import create_llm_client, get_max_tokens, LLMMessage, LLMError
