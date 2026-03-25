@@ -5,6 +5,8 @@ workspace files and composes a comprehensive system prompt.
 """
 
 import re
+import os
+import shutil
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,6 +41,8 @@ class SkillPromptEntry:
     auxiliary_files: tuple[str, ...]
     disable_model_invocation: bool = False
     user_invocable: bool = True
+    required_bins: tuple[str, ...] = ()
+    required_env: tuple[str, ...] = ()
 
 
 def _read_file_safe(path: Path, max_chars: int = 3000) -> str:
@@ -135,6 +139,14 @@ def _parse_bool_frontmatter(value: object, default: bool = False) -> bool:
     return default
 
 
+def _which_binary(binary_name: str) -> str | None:
+    return shutil.which(binary_name)
+
+
+def _has_env_var(env_name: str) -> bool:
+    return bool(os.getenv(env_name))
+
+
 def _normalize_match_text(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
 
@@ -174,9 +186,49 @@ def _extract_skill_keywords(content: str, frontmatter: dict) -> tuple[str, ...]:
     return tuple(deduped)
 
 
+def _normalize_requirement_items(raw_value: object) -> tuple[str, ...]:
+    items: list[str] = []
+    if isinstance(raw_value, str):
+        items.extend(part.strip() for part in raw_value.split(","))
+    elif isinstance(raw_value, list):
+        items.extend(str(part).strip() for part in raw_value)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if item and item not in seen:
+            seen.add(item)
+            deduped.append(item)
+    return tuple(deduped)
+
+
+def _extract_skill_requirements(frontmatter: dict) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    require_blocks: list[dict] = []
+    top_level_requires = frontmatter.get("requires")
+    if isinstance(top_level_requires, dict):
+        require_blocks.append(top_level_requires)
+
+    metadata = frontmatter.get("metadata")
+    if isinstance(metadata, dict):
+        openclaw_meta = metadata.get("openclaw")
+        if isinstance(openclaw_meta, dict):
+            openclaw_requires = openclaw_meta.get("requires")
+            if isinstance(openclaw_requires, dict):
+                require_blocks.append(openclaw_requires)
+
+    bins: list[str] = []
+    envs: list[str] = []
+    for block in require_blocks:
+        bins.extend(_normalize_requirement_items(block.get("bins")))
+        envs.extend(_normalize_requirement_items(block.get("env")))
+
+    return _normalize_requirement_items(bins), _normalize_requirement_items(envs)
+
+
 def _build_skill_entry(entry: Path, rel_path: str, content: str, auxiliary_files: tuple[str, ...]) -> SkillPromptEntry:
     frontmatter = _parse_skill_frontmatter_data(content)
     name, description = _parse_skill_frontmatter(content, entry.stem if entry.is_file() else entry.name)
+    required_bins, required_env = _extract_skill_requirements(frontmatter)
     return SkillPromptEntry(
         name=name,
         description=description,
@@ -186,6 +238,8 @@ def _build_skill_entry(entry: Path, rel_path: str, content: str, auxiliary_files
         auxiliary_files=auxiliary_files,
         disable_model_invocation=_parse_bool_frontmatter(frontmatter.get("disable-model-invocation"), default=False),
         user_invocable=_parse_bool_frontmatter(frontmatter.get("user-invocable"), default=True),
+        required_bins=required_bins,
+        required_env=required_env,
     )
 
 
@@ -282,42 +336,86 @@ def _score_skill_match(skill: SkillPromptEntry, activation_hint: str) -> int:
     return score
 
 
-def _select_activated_skills(skill_entries: list[SkillPromptEntry], activation_hint: str | None) -> list[SkillPromptEntry]:
+def _get_missing_runtime_requirements(skill: SkillPromptEntry) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    missing_bins = tuple(bin_name for bin_name in skill.required_bins if not _which_binary(bin_name))
+    missing_env = tuple(env_name for env_name in skill.required_env if not _has_env_var(env_name))
+    return missing_bins, missing_env
+
+
+def _format_missing_runtime_requirements(missing_bins: tuple[str, ...], missing_env: tuple[str, ...]) -> str:
+    parts: list[str] = []
+    if missing_bins:
+        parts.append(f"missing bins: {', '.join(missing_bins)}")
+    if missing_env:
+        parts.append(f"missing env: {', '.join(missing_env)}")
+    return "; ".join(parts)
+
+
+def _select_activated_skills(
+    skill_entries: list[SkillPromptEntry],
+    activation_hint: str | None,
+) -> tuple[list[SkillPromptEntry], list[str]]:
     if not activation_hint:
-        return []
+        return [], []
 
     ranked = [
         (skill, _score_skill_match(skill, activation_hint))
         for skill in skill_entries
     ]
     ranked = [(skill, score) for skill, score in ranked if score > 0]
-    ranked.sort(key=lambda item: (-item[1], item[0].name.lower()))
-    return [skill for skill, _score in ranked[:_MAX_ACTIVATED_SKILLS]]
+    blocked_reasons: list[tuple[int, str]] = []
+    selectable: list[tuple[SkillPromptEntry, int]] = []
+
+    for skill, score in ranked:
+        missing_bins, missing_env = _get_missing_runtime_requirements(skill)
+        if missing_bins or missing_env:
+            reason = _format_missing_runtime_requirements(missing_bins, missing_env)
+            blocked_reasons.append((score, f"- {skill.name}: {reason}"))
+            continue
+        selectable.append((skill, score))
+
+    selectable.sort(key=lambda item: (-item[1], item[0].name.lower()))
+    blocked_reasons.sort(key=lambda item: -item[0])
+    activated = [skill for skill, _score in selectable[:_MAX_ACTIVATED_SKILLS]]
+    return activated, [reason for _score, reason in blocked_reasons[:_MAX_ACTIVATED_SKILLS]]
 
 
-def _format_activated_skills_text(skill_entries: list[SkillPromptEntry]) -> str:
-    if not skill_entries:
+def _format_activated_skills_text(skill_entries: list[SkillPromptEntry], skipped_reasons: list[str]) -> str:
+    if not skill_entries and not skipped_reasons:
         return ""
 
-    lines = [
-        "## Activated Skills For Current Request",
-        "The following skills strongly match the current request and are preloaded.",
-        "Follow these skill instructions before falling back to generic reasoning.",
-    ]
-    for skill in skill_entries:
-        lines.append(f"\n### {skill.name}")
-        lines.append(f"- File: skills/{skill.rel_path}")
-        if skill.description:
-            lines.append(f"- Description: {skill.description}")
-        if skill.auxiliary_files:
-            aux_list = ", ".join(f"skills/{Path(skill.rel_path).parent}/{name}" for name in skill.auxiliary_files[:_MAX_AUX_FILES])
-            lines.append(f"- Auxiliary files: {aux_list}")
-        body = skill.content
-        if len(body) > _MAX_SKILL_BODY_CHARS:
-            body = body[:_MAX_SKILL_BODY_CHARS].rstrip() + "\n...(truncated)"
-        lines.append("```md")
-        lines.append(body)
-        lines.append("```")
+    lines: list[str] = []
+    if skill_entries:
+        lines.extend([
+            "## Activated Skills For Current Request",
+            "The following skills strongly match the current request and are preloaded.",
+            "Follow these skill instructions before falling back to generic reasoning.",
+        ])
+        for skill in skill_entries:
+            lines.append(f"\n### {skill.name}")
+            lines.append(f"- File: skills/{skill.rel_path}")
+            if skill.description:
+                lines.append(f"- Description: {skill.description}")
+            if skill.auxiliary_files:
+                aux_list = ", ".join(
+                    f"skills/{Path(skill.rel_path).parent}/{name}" for name in skill.auxiliary_files[:_MAX_AUX_FILES]
+                )
+                lines.append(f"- Auxiliary files: {aux_list}")
+            body = skill.content
+            if len(body) > _MAX_SKILL_BODY_CHARS:
+                body = body[:_MAX_SKILL_BODY_CHARS].rstrip() + "\n...(truncated)"
+            lines.append("```md")
+            lines.append(body)
+            lines.append("```")
+
+    if skipped_reasons:
+        if lines:
+            lines.append("")
+        lines.extend([
+            "## Skipped Skills For Current Request",
+            "These matching skills were not preloaded because runtime requirements are missing.",
+        ])
+        lines.extend(skipped_reasons)
     return "\n".join(lines)
 
 
@@ -342,7 +440,8 @@ def _build_skill_prompt_sections(agent_id: uuid.UUID, activation_hint: str | Non
     lines.append("3. Do NOT guess what the skill contains — always read it first when it is not preloaded.")
     lines.append("4. Folder-based skills may contain auxiliary files (scripts/, references/, examples/). Use `list_files` on the skill folder to discover them.")
 
-    activated_skills_text = _format_activated_skills_text(_select_activated_skills(skill_entries, activation_hint))
+    activated_skills, skipped_reasons = _select_activated_skills(skill_entries, activation_hint)
+    activated_skills_text = _format_activated_skills_text(activated_skills, skipped_reasons)
     return "\n".join(lines), activated_skills_text
 
 

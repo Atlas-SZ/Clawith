@@ -166,3 +166,84 @@ user-invocable: false
     )
 
     assert "db-migration" in activated_text
+
+
+def test_build_skill_prompt_sections_blocks_missing_runtime_requirements(monkeypatch, tmp_path):
+    agent_id = uuid.uuid4()
+    tool_root = tmp_path / "tool"
+    data_root = tmp_path / "data"
+    monkeypatch.setattr(agent_context, "TOOL_WORKSPACE", tool_root)
+    monkeypatch.setattr(agent_context, "PERSISTENT_DATA", data_root)
+
+    _write_skill(
+        data_root,
+        agent_id,
+        "mysql-audit",
+        """---
+name: mysql-audit
+description: Audit mysql schema and constraints
+requires:
+  bins: [mysql]
+  env: [MYSQL_PWD]
+keywords:
+  - mysql
+  - schema audit
+---
+
+# MySQL Audit
+""",
+    )
+
+    monkeypatch.setattr(agent_context, "_which_binary", lambda _name: None)
+    monkeypatch.setattr(agent_context, "_has_env_var", lambda _name: False)
+
+    _index_text, activated_text = agent_context._build_skill_prompt_sections(
+        agent_id,
+        activation_hint="Please do a mysql schema audit for this database.",
+    )
+
+    assert "### mysql-audit" not in activated_text
+    assert "Skipped Skills For Current Request" in activated_text
+    assert "mysql-audit" in activated_text
+    assert "missing bins: mysql" in activated_text
+    assert "missing env: MYSQL_PWD" in activated_text
+
+
+def test_build_skill_prompt_sections_uses_openclaw_metadata_requires(monkeypatch, tmp_path):
+    agent_id = uuid.uuid4()
+    tool_root = tmp_path / "tool"
+    data_root = tmp_path / "data"
+    monkeypatch.setattr(agent_context, "TOOL_WORKSPACE", tool_root)
+    monkeypatch.setattr(agent_context, "PERSISTENT_DATA", data_root)
+
+    _write_skill(
+        data_root,
+        agent_id,
+        "ops-rollback",
+        """---
+name: ops-rollback
+description: Rollback deployment safely
+metadata:
+  openclaw:
+    requires:
+      bins: [kubectl]
+      env: [KUBECONFIG]
+keywords:
+  - rollback
+  - deploy
+---
+
+# Ops Rollback
+""",
+    )
+
+    monkeypatch.setattr(agent_context, "_which_binary", lambda _name: "/usr/bin/fake")
+    monkeypatch.setattr(agent_context, "_has_env_var", lambda _name: True)
+
+    _index_text, activated_text = agent_context._build_skill_prompt_sections(
+        agent_id,
+        activation_hint="We need to rollback deployment now.",
+    )
+
+    assert "ops-rollback" in activated_text
+    assert "Skipped Skills For Current Request" not in activated_text
