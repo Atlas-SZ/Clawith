@@ -102,3 +102,67 @@ disable-model-invocation: true
 
     assert "secret-research" not in index_text
     assert activated_text == ""
+
+
+def test_build_skill_prompt_sections_respects_user_invocable_flag(monkeypatch, tmp_path):
+    agent_id = uuid.uuid4()
+    tool_root = tmp_path / "tool"
+    data_root = tmp_path / "data"
+    monkeypatch.setattr(agent_context, "TOOL_WORKSPACE", tool_root)
+    monkeypatch.setattr(agent_context, "PERSISTENT_DATA", data_root)
+
+    _write_skill(
+        data_root,
+        agent_id,
+        "db-migration",
+        """---
+name: db-migration
+description: Perform safe schema and data migrations
+user-invocable: false
+keywords:
+  - database migration
+  - schema change
+---
+
+# DB Migration
+
+Use this skill for schema and data migrations.
+""",
+    )
+
+    index_text, activated_text = agent_context._build_skill_prompt_sections(
+        agent_id,
+        activation_hint="Help me migrate a database schema for production safely.",
+    )
+
+    assert "db-migration" in index_text
+    assert "db-migration" not in activated_text
+
+
+def test_build_skill_prompt_sections_allows_explicit_skill_name_for_non_invocable(monkeypatch, tmp_path):
+    agent_id = uuid.uuid4()
+    tool_root = tmp_path / "tool"
+    data_root = tmp_path / "data"
+    monkeypatch.setattr(agent_context, "TOOL_WORKSPACE", tool_root)
+    monkeypatch.setattr(agent_context, "PERSISTENT_DATA", data_root)
+
+    _write_skill(
+        data_root,
+        agent_id,
+        "db-migration",
+        """---
+name: db-migration
+description: Perform safe schema and data migrations
+user-invocable: false
+---
+
+# DB Migration
+""",
+    )
+
+    _index_text, activated_text = agent_context._build_skill_prompt_sections(
+        agent_id,
+        activation_hint="Please use db-migration for this request.",
+    )
+
+    assert "db-migration" in activated_text

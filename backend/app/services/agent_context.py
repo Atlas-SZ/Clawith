@@ -38,6 +38,7 @@ class SkillPromptEntry:
     keywords: tuple[str, ...]
     auxiliary_files: tuple[str, ...]
     disable_model_invocation: bool = False
+    user_invocable: bool = True
 
 
 def _read_file_safe(path: Path, max_chars: int = 3000) -> str:
@@ -184,6 +185,7 @@ def _build_skill_entry(entry: Path, rel_path: str, content: str, auxiliary_files
         keywords=_extract_skill_keywords(content, frontmatter),
         auxiliary_files=auxiliary_files,
         disable_model_invocation=_parse_bool_frontmatter(frontmatter.get("disable-model-invocation"), default=False),
+        user_invocable=_parse_bool_frontmatter(frontmatter.get("user-invocable"), default=True),
     )
 
 
@@ -232,11 +234,31 @@ def _load_skill_entries(agent_id: uuid.UUID) -> list[SkillPromptEntry]:
     return entries
 
 
+def _get_explicit_reference_phrases(skill: SkillPromptEntry) -> tuple[str, ...]:
+    phrases = [skill.name]
+    folder_name = Path(skill.rel_path).parent.name
+    if folder_name and folder_name != ".":
+        phrases.append(folder_name)
+    return tuple(dict.fromkeys(phrases))
+
+
+def _contains_explicit_skill_reference(skill: SkillPromptEntry, hint_normalized: str) -> bool:
+    for phrase in _get_explicit_reference_phrases(skill):
+        normalized_phrase = " ".join(_normalize_match_text(phrase).split())
+        if normalized_phrase and f" {normalized_phrase} " in hint_normalized:
+            return True
+    return False
+
+
 def _score_skill_match(skill: SkillPromptEntry, activation_hint: str) -> int:
     if not activation_hint.strip():
         return 0
 
     hint_normalized = f" {_normalize_match_text(activation_hint)} "
+    explicit_reference = _contains_explicit_skill_reference(skill, hint_normalized)
+    if not skill.user_invocable and not explicit_reference:
+        return 0
+
     hint_tokens = _tokenize_match_text(activation_hint)
     if not hint_tokens:
         return 0
@@ -246,7 +268,7 @@ def _score_skill_match(skill: SkillPromptEntry, activation_hint: str) -> int:
     description_tokens = _tokenize_match_text(skill.description)
     keyword_tokens = set().union(*(_tokenize_match_text(keyword) for keyword in skill.keywords)) if skill.keywords else set()
 
-    for phrase in {skill.name, Path(skill.rel_path).parent.name, *skill.keywords}:
+    for phrase in {*_get_explicit_reference_phrases(skill), *skill.keywords}:
         normalized_phrase = " ".join(_normalize_match_text(phrase).split())
         if normalized_phrase and f" {normalized_phrase} " in hint_normalized:
             score += 8 if phrase == skill.name else 5
