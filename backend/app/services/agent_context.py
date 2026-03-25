@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
+from loguru import logger
 
 from app.config import get_settings
 
@@ -693,6 +694,17 @@ You have access to Atlassian tools via the Rovo MCP server. **Always call them v
 
     if memory and memory not in ("_这里记录重要的信息和学到的知识。_", "_Record important information and knowledge here._"):
         parts.append(f"\n## Memory\n{memory}")
+
+    if activation_hint:
+        activated_names = re.findall(r"^### (.+)$", activated_skills_text, flags=re.MULTILINE)
+        skipped_names = re.findall(r"^- ([^:]+):", activated_skills_text, flags=re.MULTILINE)
+        logger.info(
+            "[SkillActivation] agent={} activated={} skipped={} hint={}",
+            str(agent_id),
+            activated_names,
+            skipped_names,
+            activation_hint[:180],
+        )
 
     if activated_skills_text:
         parts.append(f"\n{activated_skills_text}")
