@@ -1,3 +1,4 @@
+import contextlib
 import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -14,7 +15,7 @@ from app.models.org import OrgDepartment, OrgMember
 from app.models.password_reset_token import PasswordResetToken
 from app.models.user import User
 from app.schemas.schemas import ForgotPasswordRequest, ResetPasswordRequest
-from app.services import org_sync_service, password_reset_service
+from app.services import org_sync_service, password_reset_service, system_email_service
 from app.services.system_email_service import SystemEmailConfigError
 
 
@@ -190,6 +191,95 @@ async def test_forgot_password_queues_background_email(monkeypatch):
     assert response["ok"] is True
     assert db.committed is True
     assert len(background_tasks.tasks) == 1
+
+
+def test_system_email_config_uses_configured_timeout(monkeypatch):
+    monkeypatch.setattr(
+        system_email_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            SYSTEM_EMAIL_FROM_ADDRESS="bot@example.com",
+            SYSTEM_EMAIL_FROM_NAME="Clawith",
+            SYSTEM_SMTP_HOST="smtp.example.com",
+            SYSTEM_SMTP_PORT=465,
+            SYSTEM_SMTP_USERNAME="",
+            SYSTEM_SMTP_PASSWORD="secret",
+            SYSTEM_SMTP_SSL=True,
+            SYSTEM_SMTP_TIMEOUT_SECONDS=42,
+        ),
+    )
+
+    config = system_email_service.get_system_email_config()
+
+    assert config.smtp_timeout_seconds == 42
+
+
+def test_system_email_config_clamps_non_positive_timeout(monkeypatch):
+    monkeypatch.setattr(
+        system_email_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            SYSTEM_EMAIL_FROM_ADDRESS="bot@example.com",
+            SYSTEM_EMAIL_FROM_NAME="Clawith",
+            SYSTEM_SMTP_HOST="smtp.example.com",
+            SYSTEM_SMTP_PORT=465,
+            SYSTEM_SMTP_USERNAME="",
+            SYSTEM_SMTP_PASSWORD="secret",
+            SYSTEM_SMTP_SSL=True,
+            SYSTEM_SMTP_TIMEOUT_SECONDS=0,
+        ),
+    )
+
+    config = system_email_service.get_system_email_config()
+
+    assert config.smtp_timeout_seconds == 1
+
+
+def test_send_system_email_uses_configured_timeout(monkeypatch):
+    captured = {}
+
+    class DummySMTPSSL:
+        def __init__(self, host: str, port: int, context=None, timeout: int | None = None):
+            captured["host"] = host
+            captured["port"] = port
+            captured["timeout"] = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def login(self, username: str, password: str):
+            captured["username"] = username
+            captured["password"] = password
+
+        def sendmail(self, from_address: str, to_addresses: list[str], message: str):
+            captured["from"] = from_address
+            captured["to"] = to_addresses
+            captured["has_message"] = bool(message)
+
+    monkeypatch.setattr(
+        system_email_service,
+        "get_system_email_config",
+        lambda: system_email_service.SystemEmailConfig(
+            from_address="bot@example.com",
+            from_name="Clawith",
+            smtp_host="smtp.example.com",
+            smtp_port=465,
+            smtp_username="bot@example.com",
+            smtp_password="secret",
+            smtp_ssl=True,
+            smtp_timeout_seconds=27,
+        ),
+    )
+    monkeypatch.setattr(system_email_service.smtplib, "SMTP_SSL", DummySMTPSSL)
+    monkeypatch.setattr(system_email_service, "_force_ipv4", lambda: contextlib.nullcontext())
+
+    system_email_service._send_system_email_sync("alice@example.com", "subject", "body")
+
+    assert captured["timeout"] == 27
+    assert captured["to"] == ["alice@example.com"]
 
 
 @pytest.mark.asyncio

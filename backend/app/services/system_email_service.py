@@ -35,6 +35,7 @@ class SystemEmailConfig:
     smtp_username: str
     smtp_password: str
     smtp_ssl: bool
+    smtp_timeout_seconds: int
 
 
 @dataclass(slots=True)
@@ -59,6 +60,8 @@ def get_system_email_config() -> SystemEmailConfig:
             "System email is not configured. Set SYSTEM_EMAIL_FROM_ADDRESS, SYSTEM_SMTP_HOST, and SYSTEM_SMTP_PASSWORD."
         )
 
+    smtp_timeout_seconds = max(1, int(settings.SYSTEM_SMTP_TIMEOUT_SECONDS))
+
     return SystemEmailConfig(
         from_address=from_address,
         from_name=settings.SYSTEM_EMAIL_FROM_NAME.strip() or "Clawith",
@@ -67,6 +70,7 @@ def get_system_email_config() -> SystemEmailConfig:
         smtp_username=smtp_username,
         smtp_password=smtp_password,
         smtp_ssl=settings.SYSTEM_SMTP_SSL,
+        smtp_timeout_seconds=smtp_timeout_seconds,
     )
 
 
@@ -85,11 +89,16 @@ def _send_system_email_sync(to: str, subject: str, body: str) -> None:
     with _force_ipv4():
         if config.smtp_ssl:
             context = ssl.create_default_context()
-            with smtplib.SMTP_SSL(config.smtp_host, config.smtp_port, context=context, timeout=15) as server:
+            with smtplib.SMTP_SSL(
+                config.smtp_host,
+                config.smtp_port,
+                context=context,
+                timeout=config.smtp_timeout_seconds,
+            ) as server:
                 server.login(config.smtp_username, config.smtp_password)
                 server.sendmail(config.from_address, [to], msg.as_string())
         else:
-            with smtplib.SMTP(config.smtp_host, config.smtp_port, timeout=15) as server:
+            with smtplib.SMTP(config.smtp_host, config.smtp_port, timeout=config.smtp_timeout_seconds) as server:
                 server.ehlo()
                 server.starttls(context=ssl.create_default_context())
                 server.ehlo()

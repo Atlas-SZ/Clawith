@@ -168,10 +168,12 @@ SYSTEM_SMTP_PORT=465
 SYSTEM_SMTP_USERNAME=bot@example.com
 SYSTEM_SMTP_PASSWORD=your-app-password
 SYSTEM_SMTP_SSL=true
+SYSTEM_SMTP_TIMEOUT_SECONDS=15
 PASSWORD_RESET_TOKEN_EXPIRE_MINUTES=30
 ```
 
 `PUBLIC_BASE_URL` must point to the user-facing frontend because reset links are generated as `/reset-password?token=...`.
+In production, set it to your public HTTPS domain (for example `https://app.example.com`), not a localhost address.
 
 Quick local validation:
 

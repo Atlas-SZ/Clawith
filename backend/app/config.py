@@ -76,6 +76,7 @@ class Settings(BaseSettings):
     SYSTEM_SMTP_USERNAME: str = ""
     SYSTEM_SMTP_PASSWORD: str = ""
     SYSTEM_SMTP_SSL: bool = True
+    SYSTEM_SMTP_TIMEOUT_SECONDS: int = 15
 
     # Docker (for Agent containers)
     DOCKER_NETWORK: str = "clawith_network"

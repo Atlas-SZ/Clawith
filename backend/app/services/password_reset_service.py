@@ -54,7 +54,10 @@ async def get_public_base_url(db: AsyncSession) -> str:
     if env_value:
         return env_value
 
-    raise RuntimeError("Public base URL is not configured.")
+    raise RuntimeError(
+        "Public base URL is not configured. Set platform public_base_url or PUBLIC_BASE_URL "
+        "(required in production for reset links)."
+    )
 
 
 async def build_password_reset_url(db: AsyncSession, raw_token: str) -> str:
